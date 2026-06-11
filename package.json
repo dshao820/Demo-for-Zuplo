@@ -1,0 +1,22 @@
+{
+  "name": "demo-for-zuplo",
+  "version": "1.0.0",
+  "description": "Demo backend API endpoint for Zuplo API Gateway integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "zuplo",
+    "api",
+    "gateway",
+    "backend",
+    "express"
+  ],
+  "author": "dshao820",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
