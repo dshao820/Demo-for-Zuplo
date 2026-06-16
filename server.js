@@ -13,6 +13,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- Origin 層驗證 (確保請求來自 Zuplo，而非直接存取) ----
+app.use((req, res, next) => {
+  // /health 不需驗證，讓 Render 監控可以直接存取
+  if (req.path === '/health') return next();
+  if (req.headers['x-backend-secret'] !== process.env.BACKEND_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+});
+
 // ---- 範例資料 (in-memory,重啟後重置) ----
 let products = [
   { id: 1, name: 'Starter Plan', price: 0, currency: 'USD' },
