@@ -2,101 +2,447 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Demo Backend API for Zuplo",
-    "version": "1.0.0",
-    "description": "範例後端 API,供 Zuplo API Gateway 介接 (作為 origin / backend)。"
+    "version": "1.1.0",
+    "description": "Product 目錄管理 API，作為 Zuplo API Gateway 後方的 origin backend。\n\n本 API 管理的資料實體為 product（訂閱方案），每筆包含 id、name、price、currency 四個欄位。資料儲存於記憶體中，服務重啟後會重置為預設的三筆資料，僅供展示與測試使用。\n\n給 AI Agent 的使用原則：\n1. 除非使用者明確提供 product id，否則一律先呼叫 listProducts 取得完整清單，再從中比對出正確的 id，切勿自行推測或編造 id。\n2. 需要修改既有 product 時，優先使用 patchProduct（部分更新）而非 updateProduct（全量覆寫），以免意外清除未指定的欄位。\n3. deleteProduct 為不可復原的破壞性操作，執行前必須先向使用者確認。"
   },
   "servers": [
-    { "url": "http://localhost:3000", "description": "Local backend" }
+    {
+      "url": "https://odin-demo-main-cf44897.d2.zuplo.dev",
+      "description": "Zuplo API Gateway（正式進入點，需帶 API key）"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "本機開發用 backend（未經 gateway，無驗證）"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "System",
+      "description": "服務健康狀態查詢"
+    },
+    {
+      "name": "Products",
+      "description": "Product（訂閱方案）的查詢與維護"
+    }
   ],
   "paths": {
     "/health": {
       "get": {
-        "summary": "Health check",
+        "tags": ["System"],
+        "summary": "Check service health",
+        "description": "查詢後端服務是否正常運作。此工具為唯讀、無參數，不會存取或變更任何 product 資料。\n\n適用時機：使用者詢問服務是否正常、API 是否上線，或在其他工具連續回傳錯誤時用來判斷問題出在服務本身還是請求內容。\n\n注意：本工具無法回答任何與 product 內容相關的問題，若使用者想知道有哪些方案，應改用 listProducts。",
         "operationId": "getHealth",
         "responses": {
-          "200": { "description": "Service is healthy" }
+          "200": {
+            "description": "服務運作正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
         }
       }
     },
     "/products": {
       "get": {
-        "summary": "List products",
+        "tags": ["Products"],
+        "summary": "List all products",
+        "description": "取得系統中所有 product 的完整清單，每筆包含 id、name、price、currency。此工具為唯讀，不會變更任何資料，可安全地重複呼叫。\n\n適用時機：\n- 使用者詢問有哪些方案、想比較價格、想知道最貴或最便宜的方案。\n- 使用者以名稱（例如「Pro Plan」）指稱某個 product，但未提供 id — 此時先呼叫本工具取得清單，再從中找出對應的 id。\n- 執行 getProduct、patchProduct、updateProduct、deleteProduct 之前，若手上沒有可信的 id，一律先呼叫本工具。\n\n本工具不支援分頁、搜尋或排序參數，一次回傳全部資料；若需要篩選或排序，請取得完整清單後自行處理。",
         "operationId": "listProducts",
         "responses": {
-          "200": { "description": "A list of products" }
+          "200": {
+            "description": "Product 清單（可能為空陣列）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "description": "所有 product，依 id 由小到大排列",
+                      "items": {
+                        "$ref": "#/components/schemas/Product"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "本次回傳的 product 筆數",
+                      "examples": [3]
+                    }
+                  },
+                  "required": ["data", "count"]
+                },
+                "examples": {
+                  "default": {
+                    "summary": "預設的三筆方案資料",
+                    "value": {
+                      "data": [
+                        { "id": 1, "name": "Starter Plan", "price": 0, "currency": "USD" },
+                        { "id": 2, "name": "Pro Plan", "price": 49, "currency": "USD" },
+                        { "id": 3, "name": "Enterprise Plan", "price": 299, "currency": "USD" }
+                      ],
+                      "count": 3
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       },
       "post": {
-        "summary": "Create a product",
+        "tags": ["Products"],
+        "summary": "Create a new product",
+        "description": "新增一筆 product。id 由系統自動產生並回傳，呼叫端不得自行指定。\n\n適用時機：使用者明確要求新增、建立一個新方案時。\n\n注意事項：\n- 本工具會實際寫入資料，屬於變更性操作。若使用者的敘述模稜兩可（例如可能是想「修改」既有方案而非新增），應先確認再執行。\n- 本 API 不會檢查名稱是否重複，重複呼叫會產生多筆內容相同但 id 不同的資料，因此請勿因為不確定是否成功而重試；如需確認結果，改用 listProducts 檢查。\n- 若使用者未指定幣別，currency 會採用預設值 USD，不需要為此追問。",
         "operationId": "createProduct",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProductInput" }
+              "schema": {
+                "$ref": "#/components/schemas/ProductInput"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "建立一個年繳團隊方案",
+                  "value": { "name": "Team Plan", "price": 99, "currency": "USD" }
+                }
+              }
             }
           }
         },
         "responses": {
-          "201": { "description": "Product created" },
-          "400": { "description": "Invalid input" }
+          "201": {
+            "description": "建立成功，回傳含系統產生 id 的完整 product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Product"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "輸入不合法，通常是缺少 name 或 price、或 price 型別錯誤。請依錯誤訊息修正參數後重試，不要原樣重送。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
         }
       }
     },
     "/products/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Product 的唯一識別碼。必須是先前由 listProducts 或 createProduct 回傳的實際值，不可自行推測或編造。",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "examples": [2]
+          }
+        }
+      ],
       "get": {
-        "summary": "Get a product",
+        "tags": ["Products"],
+        "summary": "Get a single product by id",
+        "description": "依 id 取得單一 product 的完整內容。此工具為唯讀，不會變更任何資料。\n\n適用時機：已經確定目標 product 的 id，且只需要該筆資料時。\n\n若手上沒有 id，或只知道方案名稱，請改用 listProducts 一次取得全部資料，不要用連續猜測 id 的方式尋找。",
         "operationId": "getProduct",
-        "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
-        ],
         "responses": {
-          "200": { "description": "A product" },
-          "404": { "description": "Not found" }
+          "200": {
+            "description": "找到對應的 product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Product"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "指定的 id 不存在。請改用 listProducts 確認實際有哪些 id，不要用其他 id 反覆重試。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
         }
       },
-      "put": {
-        "summary": "Update a product",
-        "operationId": "updateProduct",
-        "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
-        ],
+      "patch": {
+        "tags": ["Products"],
+        "summary": "Partially update a product",
+        "description": "部分更新一筆既有 product，只需傳入要修改的欄位，未提供的欄位維持原值。\n\n這是修改既有 product 的預設選擇。除非使用者明確表示要重新設定整筆資料的所有欄位，否則一律使用本工具而非 updateProduct，以避免意外清除未指定的欄位。\n\n適用時機：使用者說「把 Pro Plan 的價格改成 59」「這個方案改成台幣計價」等只涉及部分欄位的修改。\n\n注意：id 無法透過本工具修改。至少需提供 name、price、currency 其中一個欄位。",
+        "operationId": "patchProduct",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ProductInput" }
+              "schema": {
+                "$ref": "#/components/schemas/ProductPatch"
+              },
+              "examples": {
+                "priceOnly": {
+                  "summary": "只調整價格，名稱與幣別不變",
+                  "value": { "price": 59 }
+                }
+              }
             }
           }
         },
         "responses": {
-          "200": { "description": "Product updated" },
-          "404": { "description": "Not found" }
+          "200": {
+            "description": "更新成功，回傳更新後的完整 product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Product"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "未提供任何可更新的欄位，或欄位型別錯誤。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "指定的 id 不存在。請先用 listProducts 確認正確的 id。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["Products"],
+        "summary": "Replace a product (full overwrite)",
+        "description": "以傳入的內容「完整覆寫」一筆既有 product。未提供的選填欄位會被重設為預設值，而非保留原值。\n\n警告：這是全量覆寫操作，容易造成資料遺失。只有在使用者明確要求重新設定整筆資料時才使用；一般的欄位修改請改用 patchProduct。\n\n若仍需使用本工具，執行前應先呼叫 getProduct 取得現況，將不打算變更的欄位一併帶入 request body，以免被覆寫。",
+        "operationId": "updateProduct",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "覆寫成功，回傳更新後的完整 product",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Product"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "輸入不合法，通常是缺少必填的 name 或 price。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "指定的 id 不存在。請先用 listProducts 確認正確的 id。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
         }
       },
       "delete": {
-        "summary": "Delete a product",
+        "tags": ["Products"],
+        "summary": "Delete a product permanently",
+        "description": "永久刪除一筆 product。此操作不可復原，且沒有回收機制。\n\n執行前必須滿足以下條件：\n1. 使用者已明確指名要刪除哪一筆 product，且該指令沒有其他合理解讀。\n2. 已向使用者複述將被刪除的 product 名稱與 id 並取得確認。\n\n若使用者只是說「這個方案不要了」「先拿掉」等模糊敘述，應先確認是要刪除還是停用，不要逕行呼叫本工具。刪除後若發現有誤，唯一的還原方式是重新以 createProduct 建立，但 id 不會與原本相同。",
         "operationId": "deleteProduct",
-        "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
-        ],
         "responses": {
-          "200": { "description": "Product deleted" },
-          "404": { "description": "Not found" }
+          "200": {
+            "description": "刪除成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean",
+                      "description": "固定為 true，代表刪除已完成"
+                    },
+                    "id": {
+                      "type": "integer",
+                      "description": "被刪除的 product id"
+                    }
+                  },
+                  "required": ["deleted", "id"]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "指定的 id 不存在，可能已被刪除。請用 listProducts 確認目前狀態，不要重複呼叫。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
         }
       }
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "由 Zuplo Gateway 核發的 API key，以 Authorization: Bearer <key> 帶入。直接呼叫 origin backend 時不需要。"
+      }
+    },
     "schemas": {
+      "Product": {
+        "type": "object",
+        "description": "一筆訂閱方案的完整內容。",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "系統自動產生的唯一識別碼，建立後不可變更。呼叫其他工具時所需的 id 必須取自本欄位。",
+            "examples": [2]
+          },
+          "name": {
+            "type": "string",
+            "description": "方案名稱，例如 Starter Plan、Pro Plan。系統不強制唯一，可能有同名的不同方案。",
+            "examples": ["Pro Plan"]
+          },
+          "price": {
+            "type": "number",
+            "description": "每月費用，未稅。0 代表免費方案。可為小數。",
+            "examples": [49]
+          },
+          "currency": {
+            "type": "string",
+            "description": "價格的幣別，ISO 4217 三碼代碼。",
+            "examples": ["USD"]
+          }
+        },
+        "required": ["id", "name", "price", "currency"]
+      },
       "ProductInput": {
         "type": "object",
-        "required": ["name", "price"],
+        "description": "建立或全量覆寫 product 時的輸入內容。不含 id，id 由系統管理。",
         "properties": {
-          "name": { "type": "string" },
-          "price": { "type": "number" },
-          "currency": { "type": "string", "default": "USD" }
-        }
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "方案名稱，必填，不可為空字串。",
+            "examples": ["Team Plan"]
+          },
+          "price": {
+            "type": "number",
+            "minimum": 0,
+            "description": "每月費用，未稅，必填。免費方案請填 0，不要省略此欄位。",
+            "examples": [99]
+          },
+          "currency": {
+            "type": "string",
+            "description": "幣別的 ISO 4217 三碼代碼，選填。未提供時預設為 USD，使用者未指定時不需追問。",
+            "default": "USD",
+            "examples": ["USD"]
+          }
+        },
+        "required": ["name", "price"],
+        "additionalProperties": false
+      },
+      "ProductPatch": {
+        "type": "object",
+        "description": "部分更新 product 時的輸入內容。所有欄位皆為選填，但至少需提供一個；未提供的欄位維持原值不變。",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "新的方案名稱。不打算改名時請完全省略此欄位，不要傳入原值或空字串。"
+          },
+          "price": {
+            "type": "number",
+            "minimum": 0,
+            "description": "新的每月費用，未稅。不打算改價時請完全省略此欄位。"
+          },
+          "currency": {
+            "type": "string",
+            "description": "新的幣別 ISO 4217 三碼代碼。不打算改幣別時請完全省略此欄位。"
+          }
+        },
+        "minProperties": 1,
+        "additionalProperties": false
+      },
+      "HealthStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "服務狀態，正常時為 ok",
+            "examples": ["ok"]
+          },
+          "uptime": {
+            "type": "number",
+            "description": "服務已運行的秒數"
+          }
+        },
+        "required": ["status"]
+      },
+      "Error": {
+        "type": "object",
+        "description": "統一的錯誤回應格式。",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "錯誤代碼，例如 NOT_FOUND、INVALID_INPUT",
+            "examples": ["NOT_FOUND"]
+          },
+          "message": {
+            "type": "string",
+            "description": "人類可讀的錯誤說明，內容已足以判斷該如何修正請求。",
+            "examples": ["Product with id 99 does not exist"]
+          }
+        },
+        "required": ["error", "message"]
       }
     }
   }
